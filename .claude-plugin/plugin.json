@@ -1,0 +1,19 @@
+{
+  "name": "ccpii",
+  "version": "0.1.0",
+  "description": "Replaces personal data in prompts and tool results with numbered placeholders (⟦EMAIL_0⟧, ⟦PERSON_1⟧) found by openai/privacy-filter, and restores them in tool calls.",
+  "author": {
+    "name": "xchacha20-poly1305"
+  },
+  "repository": "https://github.com/xchacha20-poly1305/ccpii",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "endpoint": {
+      "type": "string",
+      "title": "Detection endpoint",
+      "description": "URL of your own detection service (POST {\"texts\"} -> {\"spans\"}, see BACKENDS.md). Empty: run the bundled openai/privacy-filter.",
+      "default": ""
+    }
+  }
+}
