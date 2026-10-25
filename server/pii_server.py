@@ -41,7 +41,14 @@ requests wait for the load. On SIGTERM or SIGINT it removes the socket and
 its directory; after a SIGKILL whoever starts the next one removes them.
 
 Status lines go to stdout, one word first: `downloading`, `installed`,
-`missing`, `listening <socket path>`, `loading`, `ready`, `failed <reason>`.
+`missing`, `listening <socket path>`, `loading`, `ready`, `failed <reason>`,
+and while serving `gpu starting` (a GPU model is built, its worker starts),
+`device cpu` or `device gpu` (which one answers now) and `fallback <reason>`
+(the GPU failed and the CPU took over; see GpuForward).
+
+With an OpenVINO model for the GPU at `GPU_MODEL` (GPU.md), the forward pass
+runs on the GPU in a worker process, `gpu_worker.py`, and on the CPU only
+while the GPU is not answering.
 """
 
 from __future__ import annotations
@@ -50,13 +57,17 @@ import argparse
 import fcntl
 import json
 import os
+import select
 import shutil
 import signal
 import socket
 import socketserver
+import struct
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -74,6 +85,9 @@ FILES = {
     "onnx/model_quantized.onnx_data": "model_quantized.onnx_data",
 }
 ONNX_MODEL = MODEL_DIR / "model_quantized.onnx"
+# An OpenVINO model of your own making (GPU.md), run by `gpu_worker.py`.
+GPU_MODEL = MODEL_DIR / "openvino-int8" / "model.xml"
+GPU_WORKER = Path(__file__).with_name("gpu_worker.py")
 # tiktoken caches its encoding under $TMPDIR by default, which the system
 # may clear; kept beside the model, serving never needs the network.
 os.environ["TIKTOKEN_CACHE_DIR"] = str(MODEL_DIR / "tiktoken")
@@ -162,6 +176,171 @@ class OnnxForward:
         return torch.from_numpy(logits)
 
 
+class GpuForward:
+    """The forward pass on the GPU, in `gpu_worker.py`, under a watchdog.
+
+    With system memory short, i915 has been seen to hang the worker's compute
+    context: the call then never returns and the process ignores every signal
+    but SIGKILL. So each call waits `ANSWER_SECONDS` at most; past that, or on
+    an error, the worker is killed, the call returns None for the CPU to
+    answer, and a new worker starts after a delay that doubles with each
+    failure in a row, once enough memory is available. Calls before the
+    worker is ready also return None.
+    """
+
+    # A 4096-token window takes under a second.
+    ANSWER_SECONDS = 5.0
+    # Compiling, from the model cache after the first time, and running each
+    # input size once.
+    START_SECONDS = 180.0
+    FIRST_RETRY_SECONDS = 30.0
+    LAST_RETRY_SECONDS = 600.0
+    # A worker takes about 2 GB while it starts. Below this, starting one
+    # deepens the shortage that most likely failed the last, so the retry
+    # waits another round instead, not counted as a failure.
+    RETRY_LEAST_AVAILABLE_MB = 4096
+
+    def __init__(self, model: Path) -> None:
+        self._model = model
+        self._worker: subprocess.Popen | None = None
+        self._ready = False
+        self._failures = 0
+
+    def start(self) -> None:
+        """Starts a worker and waits for it in a thread of its own."""
+        worker = subprocess.Popen(
+            [shutil.which("uv") or "uv", "run", "--quiet", "--script", str(GPU_WORKER), str(self._model)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            # uv runs the worker as a child of its own and cannot pass SIGKILL
+            # on, so the pair gets a process group, killed whole.
+            start_new_session=True,
+        )
+        self._worker = worker
+        threading.Thread(target=self._wait_ready, args=(worker,), daemon=True).start()
+
+    def _wait_ready(self, worker: subprocess.Popen) -> None:
+        try:
+            ready = read_exactly(worker.stdout, 4, self.START_SECONDS) == struct.pack("<I", 0)
+        except (TimeoutError, EOFError):
+            ready = False
+        if worker is not self._worker:
+            return
+        if ready:
+            self._ready = True
+            announce("device gpu")
+        else:
+            self._fail(worker, "the GPU worker did not start")
+
+    def __call__(self, tokens, attention_mask):
+        import numpy
+        import torch
+
+        worker = self._worker
+        if not self._ready or worker is None:
+            return None
+        ids = tokens.numpy().astype(numpy.int32)[0]
+        mask = attention_mask.numpy().astype(numpy.uint8)[0]
+        try:
+            worker.stdin.write(struct.pack("<I", len(ids)) + ids.tobytes() + mask.tobytes())
+            worker.stdin.flush()
+            rows, labels = struct.unpack("<II", read_exactly(worker.stdout, 8, self.ANSWER_SECONDS))
+            if rows == 0xFFFFFFFF:
+                error = read_exactly(worker.stdout, labels, self.ANSWER_SECONDS).decode(errors="replace")
+                self._fail(worker, f"the GPU failed: {error}")
+                return None
+            data = read_exactly(worker.stdout, 4 * rows * labels, self.ANSWER_SECONDS)
+        except TimeoutError:
+            self._fail(worker, f"the GPU gave no answer within {self.ANSWER_SECONDS:g} s")
+            return None
+        except (EOFError, OSError) as error:
+            self._fail(worker, f"the GPU worker stopped ({type(error).__name__})")
+            return None
+        self._failures = 0
+        logits = numpy.frombuffer(data, dtype=numpy.float32).reshape(1, rows, labels)
+        return torch.from_numpy(logits.copy())
+
+    def _fail(self, worker: subprocess.Popen, reason: str) -> None:
+        self._ready = False
+        self._worker = None
+        kill_group(worker)
+        # A hung process can take a while to go; nothing waits for it here.
+        threading.Thread(target=worker.wait, daemon=True).start()
+        self._failures += 1
+        delay = min(self.FIRST_RETRY_SECONDS * 2 ** (self._failures - 1), self.LAST_RETRY_SECONDS)
+        announce(f"fallback {reason}; the CPU answers, the GPU is tried again in {delay:g} s")
+        announce("device cpu")
+        self._retry_after(delay)
+
+    def _retry_after(self, delay: float) -> None:
+        timer = threading.Timer(delay, self._retry, args=(delay,))
+        timer.daemon = True
+        timer.start()
+
+    def _retry(self, delay: float) -> None:
+        if available_mb() < self.RETRY_LEAST_AVAILABLE_MB:
+            self._retry_after(delay)
+            return
+        self.start()
+
+    def stop(self) -> None:
+        if self._worker is not None:
+            kill_group(self._worker)
+
+
+def kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def available_mb() -> int:
+    """The kernel's estimate of memory available without swapping, in MB."""
+    with open("/proc/meminfo") as meminfo:
+        for line in meminfo:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    return 0
+
+
+def read_exactly(stream, size: int, seconds: float) -> bytes:
+    """`size` bytes from a pipe, or TimeoutError once `seconds` have passed."""
+    deadline = time.monotonic() + seconds
+    chunks: list[bytes] = []
+    remaining = size
+    fd = stream.fileno()
+    while remaining > 0:
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            raise TimeoutError
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            raise EOFError
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+class Forward:
+    """The forward pass opf's pipeline calls: the GPU when it answers, else the CPU.
+
+    The CPU model is loaded at start even with a GPU model, though it costs
+    about 2.2 GB: the GPU fails when memory is short, the worst time to load
+    it. It also answers while the GPU worker starts.
+    """
+
+    def __init__(self, gpu: GpuForward | None) -> None:
+        self._gpu = gpu
+        self._cpu = OnnxForward(ONNX_MODEL)
+
+    def __call__(self, tokens, attention_mask):
+        logits = self._gpu(tokens, attention_mask) if self._gpu is not None else None
+        if logits is not None:
+            return logits
+        return self._cpu(tokens, attention_mask)
+
+
 class Detector:
     def __init__(self) -> None:
         self._loaded = threading.Event()
@@ -169,6 +348,7 @@ class Detector:
         self._lock = threading.Lock()
         self._runtime = None
         self._decoder = None
+        self.gpu: GpuForward | None = None
 
     def load(self) -> None:
         announce("loading")
@@ -184,12 +364,17 @@ class Detector:
             # down many times over (352 characters: 0.8 s on all cores, 0.05 s
             # on one). The forward pass has onnxruntime's own threads.
             torch.set_num_threads(1)
+            announce("device cpu")
+            if GPU_MODEL.is_file():
+                announce("gpu starting")
+                self.gpu = GpuForward(GPU_MODEL)
+                self.gpu.start()
             config, encoding = load_encoding(MODEL_DIR)
             _, _, class_names = resolve_label_space_from_config(config, context=str(MODEL_DIR))
             label_info = build_label_info(class_names)
             self._runtime = InferenceRuntime(
                 checkpoint=str(MODEL_DIR),
-                model=OnnxForward(ONNX_MODEL),
+                model=Forward(self.gpu),
                 encoding=encoding,
                 label_info=label_info,
                 device=torch.device("cpu"),
@@ -304,14 +489,16 @@ def serve() -> int:
     directory = tempfile.mkdtemp(prefix="ccpii.", dir="/tmp")
     socket_path = os.path.join(directory, "filter.sock")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    detector = Detector()
     try:
         # mkdtemp's directory is the owner's alone (0700), and so the socket in it.
-        detector = Detector()
         server = UnixHTTPServer(socket_path, make_handler(detector))
         announce(f"listening {socket_path}")
         threading.Thread(target=detector.load, daemon=True).start()
         server.serve_forever()
     finally:
+        if detector.gpu is not None:
+            detector.gpu.stop()
         shutil.rmtree(directory, ignore_errors=True)
     return 0
 

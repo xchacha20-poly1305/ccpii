@@ -35,6 +35,10 @@ It installs the Python dependencies into uv's cache and downloads the model's in
 uv run --script server/pii_server.py --download
 ```
 
+### On an Intel GPU
+
+On an Intel GPU with XMX matrix engines (Arc, including the Arc 130T/140T in Core Ultra 200H), the filter can run its forward pass there, about five times as fast on long texts (a 15 KB file: 0.75 s against 3.8 s). ccpii does not make the GPU model: the model's ONNX exports use onnxruntime-only operators, and the conversion to OpenVINO depends on exact library versions. With an OpenVINO model at `~/.cache/ccpii/privacy-filter/openvino-int8/model.xml`, the sidecar uses the GPU, keeps the CPU model loaded beside it, and gives each GPU call 5 s before the CPU answers instead: with system memory short, the i915 driver has been seen to hang the GPU's compute work. [GPU.md](GPU.md) describes what the model must be, how the fallback works, and how one was converted. `/ccpii status` says which device answers and how often the GPU has fallen back.
+
 ## Another model or backend
 
 Set the **Detection endpoint** option (`/config` › ccpii) to the URL of any service that answers ccpii's small HTTP protocol, and ccpii uses it in place of the bundled filter. [BACKENDS.md](BACKENDS.md) describes the protocol and ships two ready-made endpoints: any Hugging Face token-classification model, and Microsoft Presidio.
@@ -63,6 +67,7 @@ The placeholder table of each session is saved to `~/.claude/ccpii/v2/<session-i
 - `hooks/vault.ts`: the placeholder table (masking and restoring).
 - `hooks/filter.ts`: runs the sidecar and calls it.
 - `server/pii_server.py`: the sidecar and the install.
+- `server/gpu_worker.py`: runs a GPU model (GPU.md), a child of the sidecar.
 - `examples/`: detection endpoints for other backends (BACKENDS.md).
 
 ## Limits

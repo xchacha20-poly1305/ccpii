@@ -2,7 +2,15 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, Register } from 'claude-code'
 
 import type { Vault } from '../types'
-import { configureFilter, describeFilter, detect, filterStatus, installFilter, startFilter } from './filter'
+import {
+  configureFilter,
+  describeFilter,
+  describeGpu,
+  detect,
+  filterStatus,
+  installFilter,
+  startFilter,
+} from './filter'
 import { CLOSE, KINDS, OPEN, emptyVault, mask, placeholderOf, unmask, unmaskDeep } from './vault'
 
 type Blocks = Args<'session.append'>['message']['content']
@@ -174,6 +182,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
       const vault = await currentVault($)
       const lines = [
         `filter: ${describeFilter()}`,
+        ...(filterStatus() === 'external' ? [] : [`device: ${describeGpu()}`]),
         `filtering: ${isPaused ? 'PAUSED, content reaches the model unfiltered' : 'on'}`,
         `placeholders: ${Object.keys(vault.byPlaceholder).length}, saved in ${await savePath($, vault.sessionId)}`,
       ]

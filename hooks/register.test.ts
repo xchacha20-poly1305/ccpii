@@ -408,3 +408,37 @@ test('short texts share one request, and requests from rows appended together ru
   expect(requests.flat().join('')).toContain('write to alice@x.io')
   stop()
 })
+
+test('a filter on the GPU says so, and a GPU fallback is counted with its reason', async ($, on) => {
+  const { stop, clock } = engine(on, [], {
+    serve: started =>
+      started === 1
+        ? [...UP, 'gpu starting', 'device gpu']
+        : [...UP, 'gpu starting', 'device gpu', 'fallback the GPU gave no answer within 5 s', 'device cpu'],
+  })
+  await $.session.start(start)
+  await clock.advance(0)
+  const onGpu = (await $.command.run(ccpii('status'))).text
+  await $.command.run(ccpii('restart'))
+  await clock.advance(0)
+  const afterFallback = (await $.command.run(ccpii('status'))).text
+
+  expect(onGpu).toContain('filter: the privacy filter is ready (GPU)')
+  expect(onGpu).toContain('device: the GPU answers')
+  expect(afterFallback).toContain('filter: the privacy filter is ready (CPU)')
+  expect(afterFallback).toContain(
+    'device: the CPU answers until the GPU worker is ready; fell back to the CPU once, last: the GPU gave no answer within 5 s',
+  )
+  stop()
+})
+
+test('without a GPU model, status points to GPU.md', async ($, on) => {
+  const { stop, clock } = engine(on, [], { serve: UP })
+  await $.session.start(start)
+  await clock.advance(0)
+
+  expect((await $.command.run(ccpii('status'))).text).toContain(
+    'device: the CPU answers; GPU.md says how to run the filter on an Intel GPU',
+  )
+  stop()
+})

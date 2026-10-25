@@ -48,6 +48,13 @@ const sidecar = {
    */
   wasReady: false,
   endpoint: undefined as string | undefined,
+  /** Which device answers now, from the sidecar's `device` lines. */
+  device: 'cpu' as 'cpu' | 'gpu',
+  /** Whether the sidecar found a GPU model (its `gpu starting` line). */
+  hasGpuModel: false,
+  /** The GPU failures the CPU took over from, and the last one's reason. */
+  fallbacks: 0,
+  lastFallback: undefined as string | undefined,
 }
 
 /**
@@ -79,7 +86,10 @@ export async function startFilter($: EngineInterface): Promise<void> {
   sidecar.listening = new Promise(resolve => (markListening = resolve))
   report(generation, 'starting')
 
-  spawnScript($, generation, ['--serve'], {
+  sidecar.device = 'cpu'
+  sidecar.hasGpuModel = false
+  const isCurrent = () => generation === sidecar.generation
+  sidecar.stopChild = spawnScript($, 'pii_server.py', ['--serve'], isCurrent, {
     onLine: (word, rest) => {
       // Bound means requests are taken: each waits for the model to load.
       if (word === 'listening') {
@@ -92,6 +102,16 @@ export async function startFilter($: EngineInterface): Promise<void> {
       if (word === 'ready') sidecar.wasReady = true
       if (word === 'ready' || word === 'missing') report(generation, word)
       if (word === 'failed') report(generation, 'failed', rest)
+      if (word === 'gpu') sidecar.hasGpuModel = true
+      if (word === 'device') {
+        sidecar.device = rest === 'gpu' ? 'gpu' : 'cpu'
+        sidecar.onChange()
+      }
+      if (word === 'fallback') {
+        sidecar.fallbacks += 1
+        sidecar.lastFallback = rest
+        $.ui.log(`GPU fallback: ${rest}`, { to: 'debug' })
+      }
     },
     onExit: reason => {
       markListening()
@@ -105,7 +125,8 @@ export async function installFilter($: EngineInterface): Promise<void> {
   const generation = supersede()
   report(generation, 'installing')
 
-  spawnScript($, generation, ['--download'], {
+  const isCurrent = () => generation === sidecar.generation
+  sidecar.stopChild = spawnScript($, 'pii_server.py', ['--download'], isCurrent, {
     onLine: (word, rest) => {
       if (word === 'installed') startFilter($).catch(error => report(generation, 'exited', String(error)))
       if (word === 'failed') report(generation, 'missing', `the install failed: ${rest}`)
@@ -116,9 +137,19 @@ export async function installFilter($: EngineInterface): Promise<void> {
   })
 }
 
-/** The spans of each text, in order; throws, saying why in plain words, when the sidecar cannot answer. */
+/** The GPU side in a sentence, for /ccpii status. */
+export function describeGpu(): string {
+  if (!sidecar.hasGpuModel) return 'the CPU answers; GPU.md says how to run the filter on an Intel GPU'
+  const fallbacks =
+    sidecar.fallbacks === 0 ? '' : `; fell back to the CPU ${sidecar.fallbacks === 1 ? 'once' : `${sidecar.fallbacks} times`}, last: ${sidecar.lastFallback}`
+  const now = sidecar.device === 'gpu' ? 'the GPU answers' : 'the CPU answers until the GPU worker is ready'
+
+  return `${now}${fallbacks}`
+}
+
 /**
- * The spans in each of `texts`, offsets inside its text.
+ * The spans in each of `texts`, offsets inside its text; throws, saying why
+ * in plain words, when the filter cannot answer.
  *
  * The host ends a fetch after 30 s, with no way to ask for longer, so no
  * request carries more than `REQUEST_UNITS`: a longer text goes in pieces,
@@ -302,7 +333,7 @@ export function describeFilter(): string {
     case 'loading':
       return 'the privacy-filter model is loading'
     case 'ready':
-      return 'the privacy filter is ready'
+      return `the privacy filter is ready (${sidecar.device === 'gpu' ? 'GPU' : 'CPU'})`
     case 'missing':
       return `the privacy-filter model is not installed${sidecar.error ? ` (${sidecar.error})` : ''}; run /ccpii install`
     case 'installing':
@@ -334,20 +365,20 @@ function report(generation: number, status: FilterStatus, error?: string): void 
 }
 
 /**
- * Runs the sidecar script with `args` for as long as the module lives,
- * handing each stdout line on as its first word and the rest.
+ * Runs `server/<script>` with `args` for as long as the module lives,
+ * handing each stdout line on as its first word and the rest while
+ * `isCurrent()`. Returns what stops it.
  */
 function spawnScript(
   $: EngineInterface,
-  generation: number,
+  script: string,
   args: readonly string[],
+  isCurrent: () => boolean,
   handlers: { onLine: (word: string, rest: string) => void; onExit: (reason: string) => void },
-): void {
+): () => void {
   const child = $.process.spawn({
-    argv: ['uv', 'run', '--quiet', '--script', `${$.plugin.root}/server/pii_server.py`, ...args],
+    argv: ['uv', 'run', '--quiet', '--script', `${$.plugin.root}/server/${script}`, ...args],
   })
-  sidecar.stopChild = () => void child.return({ code: null, signal: null })
-  const isCurrent = () => generation === sidecar.generation
 
   void (async () => {
     let pending = ''
@@ -375,6 +406,8 @@ function spawnScript(
       if (isCurrent()) handlers.onExit(error instanceof Error ? error.message : String(error))
     }
   })()
+
+  return () => void child.return({ code: null, signal: null })
 }
 
 /**
