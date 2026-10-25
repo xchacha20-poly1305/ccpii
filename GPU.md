@@ -2,6 +2,13 @@
 
 ccpii can run the model's forward pass on an Intel GPU with XMX matrix engines (Arc, including the Arc 130T/140T in Core Ultra 200H). On an Arc 140T, long texts ran about five times as fast as on the CPU: a 15 KB file in 0.75 s against 3.8 s. ccpii does not make the GPU model; this page says what it expects and how one was made.
 
+A converted model, and the script that made it, are at [xchacha20-poly1305/privacy-filter-openvino](https://huggingface.co/xchacha20-poly1305/privacy-filter-openvino). After `/ccpii install`, put it where ccpii looks and run `/ccpii restart`:
+
+```shell
+uvx hf download xchacha20-poly1305/privacy-filter-openvino model.xml model.bin \
+  --local-dir ~/.cache/ccpii/privacy-filter/openvino-int8
+```
+
 ## What ccpii expects
 
 An OpenVINO model at `~/.cache/ccpii/privacy-filter/openvino-int8/model.xml` (with its `model.bin`), beside the CPU model `/ccpii install` puts in `~/.cache/ccpii/privacy-filter`. When it is there, the sidecar runs it in a worker process, `server/gpu_worker.py`, and says so: `/ccpii status` shows which device answers.
@@ -22,7 +29,7 @@ PyTorch's XPU build runs opf's own model, but its plain MoE gathers each token's
 
 ## How one was made
 
-What worked, starting from transformers' `OpenAIPrivacyFilterForTokenClassification` (the `config.json` and `model.safetensors` at the top of the model's repository), traced by OpenVINO's PyTorch frontend.
+What worked (the repository above has it as `convert.py`), starting from transformers' `OpenAIPrivacyFilterForTokenClassification` (the `config.json` and `model.safetensors` at the top of the model's repository), traced by OpenVINO's PyTorch frontend.
 
 1. **Experts as one dense block, in the shape the plugin fuses.** OpenVINO's `ConvertTiledMoeBlockTo2GatherMatmuls` matches: the tokens tiled once per expert (`Tile`, `Reshape`), one `MatMul` with `transpose_b` over `[experts, out, in]` gate-and-up weights plus a constant bias, gate and up cut apart by two `Slice`s, `Clamp` then `+ 1` on up, `Minimum` then `Swish` on gate, their product, a second `MatMul` with `transpose_b` plus bias, a `Reshape` to `[experts, tokens, 1, hidden]`, a multiply by the routing weights scattered into a dense `[tokens, experts]` matrix (`ScatterElementsUpdate`, `Transpose`, `Reshape`, `Unsqueeze`), and a `ReduceSum` over experts. Registered as an experts implementation (`transformers.integrations.moe.ALL_EXPERTS_FUNCTIONS`), this computes every expert on every token on the CPU, which only matters while tracing.
 2. **Gate and up interleaved.** The fused kernel reads gate and up as alternating rows and takes the gate's position from the start of the step-2 slice. The checkpoint keeps them as two halves; slicing the halves with step 1 matches the pattern, fuses, and then gives wrong labels with no error. Interleave the rows of the gate-and-up weights and bias, and slice `[..., 0::2]` (gate) and `[..., 1::2]` (up).
