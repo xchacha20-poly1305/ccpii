@@ -117,7 +117,115 @@ export async function installFilter($: EngineInterface): Promise<void> {
 }
 
 /** The spans of each text, in order; throws, saying why in plain words, when the sidecar cannot answer. */
+/**
+ * The spans in each of `texts`, offsets inside its text.
+ *
+ * The host ends a fetch after 30 s, with no way to ask for longer, so no
+ * request carries more than `REQUEST_UNITS`: a longer text goes in pieces,
+ * the pieces in as many requests as they need, and the requests one at a
+ * time across all callers, since the filter answers one after another and a
+ * request waiting behind another's would spend its own 30 s waiting.
+ */
 export async function detect($: EngineInterface, texts: readonly string[]): Promise<Span[][]> {
+  const spans: Span[][] = texts.map(() => [])
+  for (const request of packRequests(texts.flatMap(cutPieces))) {
+    const answers = await inTurn(() => post($, request.map(piece => piece.body)))
+    request.forEach((piece, i) => {
+      for (const span of answers[i] ?? []) {
+        const start = piece.start + span.start
+        // A span belongs to the piece whose own part it starts in; the
+        // overlap of the next or previous piece sees it too.
+        if (start < piece.ownStart || start >= piece.ownEnd) continue
+        spans[piece.text]?.push({ label: span.label, start, end: piece.start + span.end })
+      }
+    })
+  }
+
+  return spans
+}
+
+/**
+ * The most one request carries, in UTF-16 code units: the bundled filter
+ * answers that in about 4 s on a laptop CPU, well inside the 30 s.
+ */
+const REQUEST_UNITS = 16_384
+
+/**
+ * Text a piece carries past its own part on either side, so a span near a
+ * cut is seen whole and with its context. The model looks 128 tokens either
+ * way; 1,024 units hold that in any script.
+ */
+const OVERLAP_UNITS = 1_024
+
+/**
+ * Part of one text: `body` is `text.slice(start, ...)`, and the spans kept
+ * from it are those starting in `[ownStart, ownEnd)`.
+ */
+type Piece = { text: number; start: number; ownStart: number; ownEnd: number; body: string }
+
+function cutPieces(text: string, index: number): Piece[] {
+  if (text.length <= REQUEST_UNITS) {
+    return text === '' ? [] : [{ text: index, start: 0, ownStart: 0, ownEnd: text.length, body: text }]
+  }
+  const pieces: Piece[] = []
+  for (let ownStart = 0; ownStart < text.length; ) {
+    const ownEnd = cutAfter(text, ownStart, REQUEST_UNITS - 2 * OVERLAP_UNITS)
+    const start = boundary(text, Math.max(0, ownStart - OVERLAP_UNITS))
+    const end = boundary(text, Math.min(text.length, ownEnd + OVERLAP_UNITS))
+    pieces.push({ text: index, start, ownStart, ownEnd, body: text.slice(start, end) })
+    ownStart = ownEnd
+  }
+
+  return pieces
+}
+
+/**
+ * Where a piece's own part starting at `from` ends: after the last line
+ * break within `limit` units when that keeps at least half of them, else at
+ * `limit`, never between the halves of a surrogate pair.
+ */
+function cutAfter(text: string, from: number, limit: number): number {
+  if (text.length - from <= limit) return text.length
+  const lineEnd = text.lastIndexOf('\n', from + limit - 1)
+
+  return lineEnd >= from + limit / 2 ? lineEnd + 1 : boundary(text, from + limit)
+}
+
+/** `at`, or one before it when `at` would split a surrogate pair. */
+function boundary(text: string, at: number): number {
+  const code = text.charCodeAt(at - 1)
+
+  return at > 0 && at < text.length && code >= 0xd800 && code <= 0xdbff ? at - 1 : at
+}
+
+/** Pieces in order, grouped into requests of at most `REQUEST_UNITS`. */
+function packRequests(pieces: Piece[]): Piece[][] {
+  const requests: Piece[][] = []
+  let units = REQUEST_UNITS
+  for (const piece of pieces) {
+    if (units + piece.body.length > REQUEST_UNITS) {
+      requests.push([])
+      units = 0
+    }
+    requests[requests.length - 1]?.push(piece)
+    units += piece.body.length
+  }
+
+  return requests
+}
+
+/** The last request handed to `inTurn`; the next one starts after it settles. */
+let queue: Promise<unknown> = Promise.resolve()
+
+function inTurn<T>(request: () => Promise<T>): Promise<T> {
+  const turn = queue.then(request)
+  queue = turn.catch(() => {})
+
+  return turn
+}
+
+/** One `POST {"texts"}` to the endpoint or the sidecar, its answer checked. */
+async function post($: EngineInterface, texts: readonly string[]): Promise<Span[][]> {
   if (sidecar.status === 'external' && sidecar.endpoint !== undefined) {
     const response = await $.http.fetch(sidecar.endpoint, {
       method: 'POST',

@@ -31,6 +31,9 @@ function engine(on: On, emails: string[], script: Script) {
   const spawned: string[][] = []
   const commands: string[][] = []
   const fetched: { url: string; socketPath?: string }[] = []
+  /** The texts of each request, and the most requests the filter held at once. */
+  const requests: string[][] = []
+  const load = { inFlight: 0, most: 0 }
   let stop = () => {}
   const stopped = new Promise<void>(resolve => (stop = resolve))
   const clock = mock.clock(on)
@@ -68,12 +71,16 @@ function engine(on: On, emails: string[], script: Script) {
 
     return { value: { code: 0, signal: null } }
   })
-  on('http.fetch', (_, e) => {
+  on('http.fetch', async (_, e) => {
     fetched.push({ url: e.url, socketPath: e.init?.socketPath })
     if (script.isAnswering === false) {
       return { value: { status: 500, ok: false, headers: {}, text: '{"error":"model not loaded"}' } }
     }
     const { texts } = JSON.parse(e.init?.body ?? '{}') as { texts: string[] }
+    requests.push(texts)
+    load.most = Math.max(load.most, ++load.inFlight)
+    await Promise.resolve()
+    load.inFlight -= 1
     const spans = texts.map(text => {
       const found: Detected[] = []
       for (const email of emails) {
@@ -93,7 +100,7 @@ function engine(on: On, emails: string[], script: Script) {
     return { result: { stdout: '', stderr: '', interrupted: false } }
   })
 
-  return { ran, spawned, commands, fetched, clock, session, stop }
+  return { ran, spawned, commands, fetched, requests, load, clock, session, stop }
 }
 
 const UP = ['listening /tmp/ccpii.test/filter.sock', 'loading', 'ready']
@@ -344,5 +351,60 @@ test('after /clear, the new conversation gets its own notice', async ($, on) => 
   await $.session.append({ ...ROW, uuid: 'row-2' })
 
   expect(rows.appended().map(isNotice)).toEqual([false, true, false, true])
+  stop()
+})
+
+/** A tool result row holding `text`. */
+const rowOf = (text: string, uuid = 'row-long') => ({ ...ROW, uuid, message: { ...ROW.message, content: [{ type: 'text', text }] } })
+
+const textOf = (row: { message: { content: readonly Record<string, unknown>[] } }) =>
+  row.message.content.map(block => block.text).join('')
+
+test('a long text goes in pieces of bounded requests, and a span across a cut is found once', async ($, on) => {
+  const { requests, stop } = engine(on, ['alice@x.io', 'bob@x.io'], { serve: UP })
+  const rows = mock.session(on)
+  await $.session.start(start)
+  // No line breaks, so the pieces are cut at their size, 14,336 units: the
+  // first address straddles the first cut, the second sits in the last piece.
+  const text = 'x'.repeat(14_330) + 'alice@x.io' + 'x'.repeat(30_000) + 'bob@x.io' + 'y'.repeat(100) + 'alice@x.io'
+
+  await $.session.append(rowOf(text))
+
+  const masked = textOf(rows.appended()[0]!)
+  expect(masked).toBe(
+    'x'.repeat(14_330) + ph('EMAIL', 0) + 'x'.repeat(30_000) + ph('EMAIL', 1) + 'y'.repeat(100) + ph('EMAIL', 0),
+  )
+  expect(requests.length).toBeGreaterThan(1)
+  for (const texts of requests) expect(texts.join('').length).toBeLessThanOrEqual(16_384)
+  stop()
+})
+
+test('a long text is cut after a line break near the size', async ($, on) => {
+  const { requests, stop } = engine(on, ['alice@x.io'], { serve: UP })
+  const rows = mock.session(on)
+  await $.session.start(start)
+  const line = 'z'.repeat(99) + '\n'
+  const text = line.repeat(400) + 'alice@x.io\n'
+
+  await $.session.append(rowOf(text))
+
+  expect(textOf(rows.appended()[0]!)).toBe(line.repeat(400) + ph('EMAIL', 0) + '\n')
+  // The first piece's own part ends on a line break, so the second piece,
+  // which starts 1,024 units before its own part, has the break just before.
+  const second = requests.flat()[1]!
+  expect(second[1_023]).toBe('\n')
+  stop()
+})
+
+test('short texts share one request, and requests from rows appended together run one at a time', async ($, on) => {
+  const { requests, load, stop } = engine(on, ['alice@x.io'], { serve: UP })
+  mock.session(on)
+  await $.session.start(start)
+  const long = 'q'.repeat(20_000)
+
+  await Promise.all([$.session.append(rowOf(long, 'a')), $.session.append(rowOf(long, 'b')), $.session.append(ROW)])
+
+  expect(load.most).toBe(1)
+  expect(requests.flat().join('')).toContain('write to alice@x.io')
   stop()
 })

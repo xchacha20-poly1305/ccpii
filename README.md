@@ -53,7 +53,7 @@ It runs at once, mid-turn too, so it works even while the filter holds everythin
 
 ## How it runs
 
-Each session starts one sidecar process (`server/pii_server.py`) serving `POST /detect` on a Unix socket in a private directory under `/tmp`. The forward pass runs on onnxruntime (CPU); tokenizing, windows, Viterbi decoding and character offsets are opf's own code, pinned to one commit. It takes about 2 s to load, about 2.2 GB of memory, and roughly 1 s per 3 KB of text. A sidecar that was ready and then dies is started again by the next request; one that dies before it is ready is not retried, and `/ccpii restart` starts it. Either way the directory it left behind is removed at the next start, after a reload of the mod too.
+Each session starts one sidecar process (`server/pii_server.py`) serving `POST /detect` on a Unix socket in a private directory under `/tmp`. The forward pass runs on onnxruntime (CPU); tokenizing, windows, Viterbi decoding and character offsets are opf's own code, pinned to one commit. It takes about 2 s to load, about 2.2 GB of memory, and roughly 1 s per 4 KB of text. Claude Code gives each request 30 s, so a long text goes in overlapping pieces, at most 16,384 UTF-16 code units a request, one request at a time. A sidecar that was ready and then dies is started again by the next request; one that dies before it is ready is not retried, and `/ccpii restart` starts it. Either way the directory it left behind is removed at the next start, after a reload of the mod too.
 
 The placeholder table of each session is saved to `~/.claude/ccpii/v2/<session-id>.json` (directory mode 700), so a resumed session can still restore its placeholders.
 

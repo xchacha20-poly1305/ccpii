@@ -41,6 +41,7 @@ The endpoint answers `200` with one list of spans per text, in the same order:
 - **Offsets** are UTF-16 code units, start inclusive, end exclusive: what JavaScript's `String.slice` takes. Python counts code points, so convert: `len(text[:i].encode("utf-16-le")) // 2`. The two differ only past characters outside the Basic Multilingual Plane, such as emoji.
 - **Labels** become the placeholder kind. openai/privacy-filter's labels map to short kinds (`private_email` → `EMAIL`); any other label is upper-cased with characters outside `A-Z`, `0-9` and `_` turned into `_`, so `EMAIL_ADDRESS` gives `⟦EMAIL_ADDRESS_0⟧` and `per` gives `⟦PER_0⟧`. An empty label gives `PII`.
 - **Overlaps** are allowed: where spans overlap, the one that starts first (the longer, at the same start) is kept.
+- **Size and time**: a request carries at most 16,384 UTF-16 code units of text in all, and the endpoint has 30 seconds to answer it; Claude Code ends a request after that, and the text is withheld. A longer text arrives in overlapping pieces, each its own entry in `texts`, and ccpii puts the spans back together. Requests come one at a time.
 - **Failures** are fail-closed. A non-2xx status, a body that is not JSON, a list count that differs from the texts, or a span outside its text: the text is not sent to the model. The reason is shown in the status line and in what the model reads in its place.
 
 The endpoint gets the real data. Bind it to loopback (`127.0.0.1`); an endpoint on another machine sends the data there, and ccpii sends no credentials.
