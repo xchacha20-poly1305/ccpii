@@ -1,5 +1,7 @@
 # ccpii
 
+**C**laude **C**ode **P**ersonally **I**dentifiable **I**nformation.
+
 A Claude Code mod that keeps personal data away from the model. Before the model reads a prompt or a tool result, [openai/privacy-filter](https://huggingface.co/openai/privacy-filter) runs over the text locally and each detected span is replaced with a numbered placeholder of its kind: `⟦EMAIL_0⟧`, `⟦PERSON_1⟧`, `⟦PHONE_0⟧`. The same value always gets the same placeholder for the whole session. Only text in the `⟦⟧` brackets is a placeholder, so a bare `EMAIL_0` in code or docs is left as it is and never swapped for a real value.
 
 - A section added to the system prompt tells the model what the placeholders are and that it can use them as they are. Claude Code renders the system prompt once per conversation, so in a conversation the mod joined later (turned on mid-session, or a resumed one started without it) the same notice is added to the conversation instead, once, with the first placeholders.
