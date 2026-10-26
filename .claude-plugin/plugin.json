@@ -1,6 +1,6 @@
 {
   "name": "ccpii",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replaces personal data in prompts and tool results with numbered placeholders (⟦EMAIL_0⟧, ⟦PERSON_1⟧) found by openai/privacy-filter, and restores them in tool calls.",
   "author": {
     "name": "xchacha20-poly1305"
@@ -13,6 +13,18 @@
       "type": "string",
       "title": "Detection endpoint",
       "description": "URL of your own detection service (POST {\"texts\"} -> {\"spans\"}, see BACKENDS.md). Empty: run the bundled openai/privacy-filter.",
+      "default": ""
+    },
+    "unmaskedKinds": {
+      "type": "string",
+      "title": "Kinds left unmasked",
+      "description": "Comma-separated placeholder kinds never masked, for example PERSON, URL. Empty: every kind is masked.",
+      "default": ""
+    },
+    "unmaskedWords": {
+      "type": "string",
+      "title": "Words left unmasked",
+      "description": "Comma-separated words never masked, in any case, for example your login name. A detected span that holds one of them is left as it is.",
       "default": ""
     }
   }

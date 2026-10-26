@@ -62,11 +62,7 @@ export function mask(
   text: string,
   spans: readonly Span[],
 ): { vault: Vault; text: string } {
-  const kept = withoutOverlaps(spans).filter(span => {
-    const value = text.slice(span.start, span.end)
-
-    return !holdsPlaceholder(vault, value) && !isHashTakenForAccount(span.label, value)
-  })
+  const kept = withoutOverlaps(spans).filter(span => !holdsPlaceholder(vault, text.slice(span.start, span.end)))
   if (kept.length === 0) return { vault, text }
 
   let next = vault
@@ -148,25 +144,6 @@ function withoutOverlaps(spans: readonly Span[]): Span[] {
   }
 
   return kept
-}
-
-/**
- * Whether the model took a hex digest (a git commit, a sha256) for an account
- * number, as it does: account numbers are digits and letters beyond `f`.
- * A hex `secret` is still masked; a key is often written in hex.
- */
-function isHashTakenForAccount(label: string, text: string): boolean {
-  if (label !== 'account_number' || text.length < 7) return false
-  let hasDigit = false
-  let hasHexLetter = false
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i) | 0x20 // lower-case a letter, leave a digit
-    if (code >= 48 && code <= 57) hasDigit = true
-    else if (code >= 97 && code <= 102) hasHexLetter = true
-    else return false
-  }
-
-  return hasDigit && hasHexLetter
 }
 
 /** Whether `text` already holds one of the vault's placeholders: masking it again would hide the placeholder itself. */

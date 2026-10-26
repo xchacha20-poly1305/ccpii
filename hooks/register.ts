@@ -11,6 +11,8 @@ import {
   installFilter,
   startFilter,
 } from './filter'
+import { describePolicy, maskedSpans, policyOf } from './policy'
+import type { Policy } from './policy'
 import { CLOSE, KINDS, OPEN, emptyVault, mask, placeholderOf, unmask, unmaskDeep } from './vault'
 
 type Blocks = Args<'session.append'>['message']['content']
@@ -69,6 +71,8 @@ let isSaveDirMade = false
 let noticeClaim: { sessionId: string; isNew: Promise<boolean> } | undefined
 
 export const register: Register = (on, options) => {
+  const policy = policyOf(String(options.unmaskedKinds ?? ''), String(options.unmaskedWords ?? ''))
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
@@ -86,7 +90,7 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  on('command.run', { command: 'ccpii' }, async ($, e) => ({ text: await runCommand($, e.args.trim()) }))
+  on('command.run', { command: 'ccpii' }, async ($, e) => ({ text: await runCommand($, policy, e.args.trim()) }))
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
@@ -106,7 +110,7 @@ export const register: Register = (on, options) => {
     const texts = [e.text, ...(e.context ?? [])]
     let masked: string[]
     try {
-      masked = await maskTexts($, texts)
+      masked = await maskTexts($, policy, texts)
     } catch (error) {
       $.ui.toast(`Prompt not sent: ${reasonOf(error)}`)
 
@@ -130,7 +134,7 @@ export const register: Register = (on, options) => {
     let content: Blocks
     let isChanged: boolean
     try {
-      ;({ content, isChanged } = await maskBlocks($, e.message.content))
+      ;({ content, isChanged } = await maskBlocks($, policy, e.message.content))
     } catch (error) {
       content = withheld(e.message.content, reasonOf(error))
       isChanged = true
@@ -175,15 +179,17 @@ export const register: Register = (on, options) => {
   })
 }
 
-async function runCommand($: EngineInterface, args: string): Promise<string> {
+async function runCommand($: EngineInterface, policy: Policy, args: string): Promise<string> {
   switch (args) {
     case '':
     case 'status': {
       const vault = await currentVault($)
+      const unmasked = describePolicy(policy)
       const lines = [
         `filter: ${describeFilter()}`,
         ...(filterStatus() === 'external' ? [] : [`device: ${describeGpu()}`]),
         `filtering: ${isPaused ? 'PAUSED, content reaches the model unfiltered' : 'on'}`,
+        ...(unmasked === undefined ? [] : [`left unmasked: ${unmasked}`]),
         `placeholders: ${Object.keys(vault.byPlaceholder).length}, saved in ${await savePath($, vault.sessionId)}`,
       ]
 
@@ -254,7 +260,7 @@ function isReadByModel(e: Args<'session.append'>): boolean {
 }
 
 /** Masks each text against one table, issuing placeholders as it goes. */
-async function maskTexts($: EngineInterface, texts: readonly string[]): Promise<string[]> {
+async function maskTexts($: EngineInterface, policy: Policy, texts: readonly string[]): Promise<string[]> {
   if (texts.every(text => text.trim() === '')) return [...texts]
   const spans = await detect($, texts)
   await currentVault($)
@@ -264,7 +270,7 @@ async function maskTexts($: EngineInterface, texts: readonly string[]): Promise<
   const before = live ?? emptyVault('')
   let vault = before
   const masked = texts.map((text, i) => {
-    const result = mask(vault, text, spans[i] ?? [])
+    const result = mask(vault, text, maskedSpans(policy, text, spans[i] ?? []))
     vault = result.vault
 
     return result.text
@@ -278,11 +284,11 @@ async function maskTexts($: EngineInterface, texts: readonly string[]): Promise<
 }
 
 /** `content` with its texts masked, and whether any of them changed. */
-async function maskBlocks($: EngineInterface, content: Blocks): Promise<{ content: Blocks; isChanged: boolean }> {
+async function maskBlocks($: EngineInterface, policy: Policy, content: Blocks): Promise<{ content: Blocks; isChanged: boolean }> {
   const texts: string[] = []
   mapTexts(content, text => (texts.push(text), text))
   if (texts.length === 0) return { content, isChanged: false }
-  const masked = await maskTexts($, texts)
+  const masked = await maskTexts($, policy, texts)
   if (masked.every((text, i) => text === texts[i])) return { content, isChanged: false }
   let i = 0
 

@@ -43,6 +43,19 @@ On an Intel GPU with XMX matrix engines (Arc, including the Arc 130T/140T in Cor
 
 Set the **Detection endpoint** option (`/config` › ccpii) to the URL of any service that answers ccpii's small HTTP protocol, and ccpii uses it in place of the bundled filter. [BACKENDS.md](BACKENDS.md) describes the protocol and ships two ready-made endpoints: any Hugging Face token-classification model, and Microsoft Presidio.
 
+## What is left unmasked
+
+Some of what the model reports is no private data: the model takes a company or a product named after a person (`Morgan Stanley`, `Julia`) for a person, and a person's name is often public, a git author or a colleague in a review. Two options (`/config` › ccpii) leave such spans unmasked:
+
+| Option | What it takes | What it leaves unmasked |
+| --- | --- | --- |
+| **Kinds left unmasked** | Placeholder kinds, comma-separated: `PERSON, URL`. A detector's label works too (`private_person`, or another backend's `PER`). | Every span of those kinds |
+| **Words left unmasked** | Words, comma-separated, in any case: your login name, a product name. | Every span that holds one of them, so a whole `ls -l` owner column, or `Charles Darwin` for `darwin` |
+
+A word counts in a span unless it runs on into ASCII letters or digits there: `ann` is not in `Joanna`, while `张伟` is in `张伟明天`, since Chinese has no spaces between words. `/ccpii status` lists what the options leave unmasked.
+
+Three mistakes of the model are left unmasked without any option: a hex digest taken for an account number (a git commit, a sha256), a file path taken for a URL (when a text is a path and nothing else, as `pwd` prints), and a file mode taken for a person (`drwxr-xr-x` in `ls -l`). A path is one that starts with `/`, `~`, `.` or a drive letter, or whose first segment has no dot, port or user, unlike a host's (`hooks/vault.ts` against `example.com/a`); a URL with a scheme is never taken for a path.
+
 ## `/ccpii`
 
 It runs at once, mid-turn too, so it works even while the filter holds everything back.
@@ -65,6 +78,7 @@ The placeholder table of each session is saved to `~/.claude/ccpii/v2/<session-i
 
 - `hooks/register.ts`: the hooks and `/ccpii`.
 - `hooks/vault.ts`: the placeholder table (masking and restoring).
+- `hooks/policy.ts`: which detected spans are masked (the options and the model's known mistakes).
 - `hooks/filter.ts`: runs the sidecar and calls it.
 - `server/pii_server.py`: the sidecar and the install.
 - `server/gpu_worker.py`: runs a GPU model (GPU.md), a child of the sidecar.
@@ -74,7 +88,7 @@ The placeholder table of each session is saved to `~/.claude/ccpii/v2/<session-i
 
 - Permission prompts show the arguments with placeholders, and permission rules match against them.
 - A real value the model writes on its own is not filtered: only what the model reads is.
-- The model can miss or over-detect spans: in testing it took `IBAN` and random path names for people, and a user name in `ls -l` output for a person. A hex digest it takes for an account number (a git commit, a sha256) is left alone. It is a data-minimisation aid, not an anonymisation guarantee.
+- The model can miss or over-detect spans: in testing it took `IBAN`, companies and products named after people (`Morgan Stanley`, `Julia`) and random path names for people, and a user name in `ls -l` output for a person; it missed some Chinese names, and ran one on into the words after it. [What is left unmasked](#what-is-left-unmasked) says what is done about it. It is a data-minimisation aid, not an anonymisation guarantee.
 
 ## License
 

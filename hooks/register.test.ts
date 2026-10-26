@@ -442,3 +442,16 @@ test('without a GPU model, status points to GPU.md', async ($, on) => {
   )
   stop()
 })
+
+test('a kind left unmasked in the options reaches the model as it is, and status says so', { options: { unmaskedKinds: 'EMAIL' } }, async ($, on) => {
+  const { stop } = engine(on, ['alice@x.io'], { serve: UP })
+  const rows = mock.session(on)
+  await $.session.start(start)
+
+  await $.session.append(ROW)
+  const { text } = await $.command.run(ccpii('status'))
+
+  expect(JSON.stringify(rows.appended())).toContain('write to alice@x.io')
+  expect(text).toContain('left unmasked: kinds EMAIL')
+  stop()
+})

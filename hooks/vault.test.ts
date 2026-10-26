@@ -96,18 +96,6 @@ test('UTF-16 offsets past Chinese text and emoji slice correctly', async () => {
   expect(masked).toBe(`联系 😀 ${ph('PERSON', 0)}：${ph('EMAIL', 0)}`)
 })
 
-test('a hex digest taken for an account number is left alone; a hex secret is not', async () => {
-  const text = 'commit 3f9a2c1d4e5b, key 9f86d081884c7d65, IBAN GB29NWBK60161331926819'
-  const at = (needle: string) => text.indexOf(needle)
-  const { text: masked } = mask(emptyVault('s'), text, [
-    { label: 'account_number', start: at('3f9a2c1d4e5b'), end: at('3f9a2c1d4e5b') + 12 },
-    { label: 'secret', start: at('9f86d081884c7d65'), end: at('9f86d081884c7d65') + 16 },
-    { label: 'account_number', start: at('GB29'), end: text.length },
-  ])
-
-  expect(masked).toBe(`commit 3f9a2c1d4e5b, key ${ph('SECRET', 0)}, IBAN ${ph('ACCOUNT', 0)}`)
-})
-
 test('a label of another backend becomes its own kind', async () => {
   expect(kindOf('private_email')).toBe('EMAIL')
   expect(kindOf('EMAIL_ADDRESS')).toBe('EMAIL_ADDRESS')
